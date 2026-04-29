@@ -317,3 +317,5 @@ Building VibeMatch 2.0 made the gap between a rule-based system and an AI-assist
 The harder lesson was about failure modes. In the original project, failures were obvious — the code either ran or it didn't. In an LLM-integrated system, failures are quiet: the agent returns a default profile, the UI still shows recommendations, and the user has no idea their input was ignored. Designing for visible, fast failures — surfacing error messages, choosing a reliable LLM provider, failing immediately instead of sleeping and retrying — turned out to be as important as the feature logic itself.
 
 Replacing LLM-generated catalog expansion with a curated real-song catalog also changed how I think about data quality. A larger, real catalog is more valuable than an infinitely expandable fictional one, because the recommendations mean something to users. When someone searches for "melancholic Spanish songs" and gets songs they actually recognize — Shakira, Maná, Marc Anthony — that is a fundamentally better outcome than getting a list of convincing-sounding fictional artists.
+
+https://www.loom.com/share/de41919e78554a6e962772b9350d2640 

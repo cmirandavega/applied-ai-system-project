@@ -119,6 +119,44 @@ easy to distinguish from fixed-pipeline entries:
 Tests for the orchestrator live in `tests/test_orchestrator.py` and fully mock the
 Groq client, so they never make real API calls.
 
+### Bug found and fixed: batched tool calls skipped turn-by-turn observation
+
+**How it was caught:** comparing `logs/recommender.log` entries across query
+types surfaced an inconsistency. A Latin/happy query logged `Groq calls: 2`
+(correct — one call to search, one to rank), but a Pop/happy query logged
+`Groq calls: 1` for the same two-tool sequence:
+
+```
+[AGENT] Profile: {..."favorite_genre": "latin"...} | Groq calls: 2 | Tools: search_catalog → rank_songs | ...
+[AGENT] Profile: {..."favorite_genre": "pop"...}   | Groq calls: 1 | Tools: search_catalog → rank_songs | ...
+```
+
+One Groq call producing two tool results means the model returned both
+`search_catalog` and `rank_songs` in a **single response**, before it could
+have seen the search result. That defeats the entire premise of this
+orchestrator — that each branching decision is informed by the *previous*
+tool's observed output, not decided blind. It also caused the "Agent
+Tool-Call Trace" panel to render incorrectly for these batched runs.
+
+**The fix, in two layers:**
+
+1. `client.chat.completions.create(...)` now passes `parallel_tool_calls=False`
+   on every turn — this is part of the OpenAI-compatible tool-calling spec and
+   Groq's `llama-3.3-70b-versatile` honors it. Re-running the exact Pop/happy
+   profile after the change now logs `Groq calls: 2`, with `search_catalog`
+   and `rank_songs` as genuinely separate turns (confirmed both via the log
+   and by inspecting the trace directly — turn `1` for the search, turn `2`
+   for the rank).
+2. As defense-in-depth, in case a model ever returns multiple `tool_calls` in
+   one message anyway (nothing in the API guarantees the flag is always
+   honored), `AgentOrchestrator.run()` now checks `len(tool_calls) > 1`: only
+   the first call executes, the rest are discarded and logged as a `WARNING`
+   tagged `[AGENT]`, and a `batched_tool_calls_discarded` trace entry records
+   what was dropped. The system prompt was also reinforced with an explicit
+   "call exactly ONE tool per turn" instruction as a third line of defense.
+   `tests/test_forces_sequential_tool_calls` locks this in by mocking a
+   response with two tool calls in one turn and asserting only the first runs.
+
 ---
 
 ## Catalog

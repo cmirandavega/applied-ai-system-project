@@ -20,6 +20,9 @@ Failure modes / edge cases (model or environment misbehaving):
   • empty catalog                 — every stage degrades to an empty result cleanly
   • k=0 requested                 — returns an empty list, not the default k
   • trace entry shapes            — locks in the keys app.py's UI renderer depends on
+  • batched tool calls            — parallel_tool_calls=False is requested, but if the
+                                     model still returns 2+ tool_calls in one turn only
+                                     the first executes; the rest are discarded + logged
 """
 import json
 import os
@@ -527,3 +530,53 @@ def test_trace_structure_for_each_tool_type(monkeypatch):
     final_entry = next(e for e in text_trace if e["type"] == "final_message")
     assert set(final_entry.keys()) == {"turn", "type", "content"}
     assert isinstance(final_entry["content"], str)
+
+
+# ── Test 14: model batches multiple tool_calls despite parallel_tool_calls=False ──
+def test_forces_sequential_tool_calls(monkeypatch, tmp_path):
+    """parallel_tool_calls=False is requested on every Groq call, but nothing
+    guarantees the model honors it — it can still legally return 2+ tool_calls
+    in a single message. Only the first must execute; the rest are discarded
+    and a warning is logged, so a run can never silently rank on unobserved
+    state (the exact bug this guards against)."""
+    catalog = [make_song(i, f"Song {i}") for i in range(1, 9)]
+
+    log_file = tmp_path / "batch_warning.log"
+    monkeypatch.setattr(logger_module, "LOG_FILE", str(log_file))
+    monkeypatch.setattr(logger_module, "_configured", False)
+
+    client = FakeGroqClient(
+        [
+            # Turn 1: the model illegally batches search_catalog + rank_songs
+            # together. rank_songs must NOT run here — it hasn't seen the
+            # search result yet.
+            [("search_catalog", {}), ("rank_songs", {"k": 5})],
+            # Turn 2: now that search_catalog's result is visible, the model
+            # (correctly) ranks.
+            [("rank_songs", {"k": 5})],
+        ]
+    )
+
+    results, trace = orchestrator.run_orchestration(
+        PROFILE, catalog, "unused.csv", k=5, client=client
+    )
+
+    # Only search_catalog from turn 1 actually executed.
+    turn1_tool_calls = [e for e in trace if e["type"] == "tool_call" and e["turn"] == 1]
+    assert len(turn1_tool_calls) == 1
+    assert turn1_tool_calls[0]["tool"] == "search_catalog"
+
+    # The discarded rank_songs call is recorded, not silently dropped.
+    discard_entry = next(e for e in trace if e["type"] == "batched_tool_calls_discarded")
+    assert discard_entry["turn"] == 1
+    assert discard_entry["kept"] == "search_catalog"
+    assert discard_entry["discarded"] == ["rank_songs"]
+
+    # The run took a genuine second turn to rank — it didn't rank on turn 1's
+    # unobserved batch.
+    assert client.calls == 2
+    assert len(results) == 5
+
+    content = log_file.read_text(encoding="utf-8")
+    assert "[AGENT]" in content
+    assert "batched" in content.lower()

@@ -161,7 +161,11 @@ class AgentOrchestrator:
             "candidates, do NOT expand — go straight to ranking.\n"
             "4. When you have enough candidates, call rank_songs to produce the "
             "final recommendations. Do not call any tool after rank_songs.\n"
-            "Be efficient: use as few tool calls as possible."
+            "5. Call exactly ONE tool per turn. Never return more than one tool "
+            "call in a single response — wait for that tool's result before "
+            "deciding the next action. Batching multiple tool calls together is "
+            "not allowed, even if it seems more efficient.\n"
+            "Be efficient: use as few turns as possible, one tool call at a time."
         )
 
     def _user_prompt(self) -> str:
@@ -251,6 +255,7 @@ class AgentOrchestrator:
                 tools=TOOLS,
                 tool_choice="auto",
                 temperature=0,
+                parallel_tool_calls=False,
             )
             msg = response.choices[0].message
             tool_calls = getattr(msg, "tool_calls", None)
@@ -266,6 +271,25 @@ class AgentOrchestrator:
                 )
                 cap_reached = False
                 break
+
+            # parallel_tool_calls=False *should* prevent this, but nothing stops
+            # a model from legally returning several tool_calls in one message
+            # anyway. Silently running all of them would defeat the point of
+            # turn-by-turn observation, so only the first is executed; the rest
+            # are discarded and logged rather than run.
+            if len(tool_calls) > 1:
+                kept = tool_calls[0].function.name
+                discarded = [tc.function.name for tc in tool_calls[1:]]
+                self.trace.append(
+                    {
+                        "turn": self.api_calls,
+                        "type": "batched_tool_calls_discarded",
+                        "kept": kept,
+                        "discarded": discarded,
+                    }
+                )
+                rec_logger.log_orchestrator_batch_warning(kept, discarded, self.api_calls)
+                tool_calls = tool_calls[:1]
 
             # Echo the assistant's tool-call message back into the conversation.
             messages.append(

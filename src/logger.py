@@ -56,3 +56,47 @@ def log_error(user_input: str, exc: Exception) -> None:
         type(exc).__name__,
         exc,
     )
+
+
+def _summarize_trace(trace: list) -> str:
+    """Condense the orchestrator trace into a compact one-line tool sequence."""
+    steps = []
+    for entry in trace:
+        etype = entry.get("type")
+        if etype == "tool_call":
+            steps.append(entry.get("tool", "?"))
+        elif etype == "fallback":
+            steps.append("fallback")
+        elif etype == "cap_hit":
+            steps.append("cap_hit")
+        elif etype == "final_message":
+            steps.append("final_message")
+    return " → ".join(steps) if steps else "(no tool calls)"
+
+
+def log_orchestrator_run(profile: dict, results: list, trace: list, api_calls: int) -> None:
+    """Log an agent-orchestration run. Tagged [AGENT] to distinguish it from the
+    fixed-pipeline log_request entries."""
+    _configure()
+    if results:
+        top = f"{results[0][0]['title']} (score: {results[0][1]:.4f})"
+    else:
+        top = "no results"
+    _logger.info(
+        "[AGENT] Profile: %s | Groq calls: %d | Tools: %s | Top result: %s",
+        json.dumps(profile),
+        api_calls,
+        _summarize_trace(trace),
+        top,
+    )
+
+
+def log_orchestrator_warning(reason: str, api_calls: int, max_turns: int) -> None:
+    """Log a WARNING when the orchestrator hits its Groq-call safety cap."""
+    _configure()
+    _logger.warning(
+        "[AGENT] Safety cap hit: %s (Groq calls: %d, max_turns: %d)",
+        reason,
+        api_calls,
+        max_turns,
+    )

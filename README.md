@@ -54,6 +54,73 @@ The system uses a **Retrieval-Augmented Generation** pattern: the retriever narr
 
 ---
 
+## Agent Orchestration Mode
+
+The Streamlit app (`app.py`) offers two ways to run a recommendation, selectable
+with the **"Use agent orchestration"** checkbox. Both produce the same shape of
+output (a ranked list with score breakdowns) so you can compare them side by side.
+
+### Fixed pipeline (default)
+
+The default path runs the fixed sequence described in the Architecture Overview,
+and every branch in it is decided by **hardcoded heuristics**, not by a model:
+
+```
+extract_profile → retrieve_candidates → recommend_songs
+```
+
+`retrieve_candidates()` in `src/retriever.py` contains a hardcoded fallback: if
+fewer than `MIN_CANDIDATES` (6) songs match, it falls back to scoring the entire
+catalog. The branch is decided by code with fixed thresholds.
+
+### Agent orchestration (alternate)
+
+The alternate path (`src/orchestrator.py`) replaces that hardcoded branch with a
+real **LLM tool-calling loop** on the Groq backend. The model is given three tools
+and decides *itself* which to call and in what order:
+
+| Tool | What it does |
+|---|---|
+| `search_catalog` | Filter the existing catalog for candidates matching the profile |
+| `expand_catalog_tool` | Generate & append new songs, then re-search (only if candidates are thin) |
+| `rank_songs` | Score the candidates and produce the final top-k (ends the run) |
+
+A typical run is `search_catalog → rank_songs`; when the catalog is thin the model
+inserts `search_catalog → expand_catalog_tool → rank_songs` on its own. The agent's
+tool-call decisions are surfaced in the **"Agent Tool-Call Trace"** expander in the
+UI, mirroring the fixed pipeline's "RAG Retrieval Reasoning" expander.
+
+> Note: with the full 559-song catalog, `search_catalog` almost always returns
+> enough candidates, so the model goes straight to ranking; `expand_catalog_tool`
+> is exercised mainly when the candidate pool is genuinely thin.
+
+### Why offer both?
+
+- **Fixed pipeline** — deterministic, fast, no extra API calls, easy to reason about. The expansion decision is a fixed threshold.
+- **Agent orchestration** — the *branching decision* is made by the model based on the tool results it sees, rather than a fixed threshold. More flexible, but adds latency and Groq API calls and is less predictable.
+
+### Safety cap
+
+Every orchestration run is bounded by `MAX_TURNS` (default **6**) — a hard cap on
+the number of Groq API calls per run, enforced in the loop condition so a model
+that never calls `rank_songs` cannot loop forever. If the cap is hit, the run
+falls back to ranking whatever candidates it has and logs a `WARNING`.
+
+### Logging
+
+Both paths log to `logs/recommender.log`. Orchestration entries are tagged
+`[AGENT]` and include the Groq call count and the tool sequence, so they are
+easy to distinguish from fixed-pipeline entries:
+
+```
+[AGENT] Profile: {...} | Groq calls: 2 | Tools: search_catalog → rank_songs | Top result: Sunrise City (score: 4.9112)
+```
+
+Tests for the orchestrator live in `tests/test_orchestrator.py` and fully mock the
+Groq client, so they never make real API calls.
+
+---
+
 ## Catalog
 
 `data/songs.csv` contains **559 real songs** across all 15 supported genres. Songs were sourced from Billboard charts and well-known genre catalogs, with estimated audio features (energy, tempo, valence, danceability, acousticness) based on each song's known character.

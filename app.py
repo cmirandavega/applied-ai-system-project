@@ -3,6 +3,7 @@ import streamlit as st
 from src.recommender import load_songs, recommend_songs
 from src.agent import extract_profile
 from src.retriever import retrieve_candidates, retrieval_summary
+from src.orchestrator import run_orchestration
 from src import logger as rec_logger
 
 CATALOG_PATH = "data/songs.csv"
@@ -25,6 +26,16 @@ user_input = st.text_input(
 
 num_recs = st.slider("Number of recommendations", min_value=1, max_value=10, value=5)
 
+use_agent = st.checkbox(
+    "Use agent orchestration",
+    value=False,
+    help=(
+        "Let an LLM tool-calling loop decide whether to expand the catalog, "
+        "instead of the fixed hardcoded pipeline. Both produce the same shape of "
+        "results so you can compare side by side."
+    ),
+)
+
 # ── Main flow ────────────────────────────────────────────────────────────────
 if st.button("Find my music"):
 
@@ -43,13 +54,26 @@ if st.button("Find my music"):
 
     st.divider()
 
-    # ── Step 2: Load catalog + retrieve candidates ────────────────────────
+    # ── Step 2: Load catalog ──────────────────────────────────────────────
     all_songs = get_songs()
-    candidates = retrieve_candidates(profile, all_songs)
 
-    # ── Step 3: Recommend + log ───────────────────────────────────────────
-    results = recommend_songs(profile, candidates, k=num_recs)
-    rec_logger.log_request(user_input, profile, results)
+    if use_agent:
+        # ── Agent orchestration path (model-decided branching) ────────────
+        st.caption("🤖 Agent orchestration mode")
+        try:
+            results, trace = run_orchestration(
+                profile, all_songs, CATALOG_PATH, k=num_recs
+            )
+        except Exception as exc:
+            st.error(f"Agent orchestration failed: {exc}")
+            st.stop()
+        candidates = None  # retrieval reasoning is shown via the trace instead
+    else:
+        # ── Fixed pipeline path (hardcoded heuristic) ─────────────────────
+        candidates = retrieve_candidates(profile, all_songs)
+        results = recommend_songs(profile, candidates, k=num_recs)
+        rec_logger.log_request(user_input, profile, results)
+        trace = None
 
     # ── Step 4: Display results ───────────────────────────────────────────
     st.subheader(f"Top {len(results)} Recommendation{'s' if len(results) != 1 else ''}")
@@ -63,6 +87,31 @@ if st.button("Find my music"):
                 if reason.strip():
                     st.write(reason)
 
-    # ── Step 6: RAG retrieval reasoning ──────────────────────────────────
-    with st.expander("RAG Retrieval Reasoning"):
-        st.text(retrieval_summary(profile, all_songs, candidates))
+    # ── Step 5: Reasoning expanders ───────────────────────────────────────
+    if use_agent:
+        # Surface the agent's tool-call decisions so the behavior is inspectable.
+        with st.expander("Agent Tool-Call Trace"):
+            for i, entry in enumerate(trace, 1):
+                etype = entry.get("type")
+                if etype == "tool_call":
+                    st.markdown(
+                        f"**{i}. 🛠 `{entry['tool']}`** (turn {entry.get('turn')})"
+                    )
+                    if entry.get("args"):
+                        st.write(f"args: {entry['args']}")
+                    st.write(entry.get("result"))
+                elif etype == "final_message":
+                    st.markdown(f"**{i}. 💬 final message** (turn {entry.get('turn')})")
+                    st.write(entry.get("content") or "(empty)")
+                elif etype == "cap_hit":
+                    st.markdown(f"**{i}. ⚠️ safety cap hit**")
+                    st.warning(
+                        f"{entry.get('reason')} — "
+                        f"{entry.get('api_calls')} Groq calls (max {entry.get('max_turns')})."
+                    )
+                elif etype == "fallback":
+                    st.markdown(f"**{i}. ↩️ fallback ranking**")
+                    st.write(entry.get("reason"))
+    else:
+        with st.expander("RAG Retrieval Reasoning"):
+            st.text(retrieval_summary(profile, all_songs, candidates))

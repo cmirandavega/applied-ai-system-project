@@ -100,3 +100,15 @@ def log_orchestrator_warning(reason: str, api_calls: int, max_turns: int) -> Non
         api_calls,
         max_turns,
     )
+
+
+def log_orchestrator_batch_warning(kept: str, discarded: list, api_calls: int) -> None:
+    """Log a WARNING when the model batches multiple tool_calls into one turn
+    despite parallel_tool_calls=False — only ``kept`` is executed."""
+    _configure()
+    _logger.warning(
+        "[AGENT] Model batched tool calls in turn %d — executing '%s', discarding %s",
+        api_calls,
+        kept,
+        discarded,
+    )

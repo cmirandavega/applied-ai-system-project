@@ -13,3 +13,12 @@ venv/
 
 # Pytest cache
 .pytest_cache/
+
+# Secrets — never commit API keys
+.env
+
+# Runtime logs
+logs/
+
+# Claude Code local settings
+.claude/settings.local.json

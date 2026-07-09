@@ -9,6 +9,17 @@ Covered:
   • normal run   — search_catalog finds enough candidates, model skips expansion
   • thin catalog — model calls expand_catalog_tool before ranking
   • MAX_TURNS    — model never ranks; cap is enforced and a warning is logged
+
+Failure modes / edge cases (model or environment misbehaving):
+  • hallucinated tool name        — _dispatch returns an error payload, loop continues
+  • rank_songs with no search     — falls back to ranking the full catalog
+  • malformed tool-call arguments — invalid JSON args degrade to {} instead of raising
+  • Groq API error mid-loop       — propagates so app.py's try/except can surface it
+  • expansion adds zero songs     — still ranks whatever candidates exist
+  • duplicate tool calls          — candidates are reassigned, not accumulated
+  • empty catalog                 — every stage degrades to an empty result cleanly
+  • k=0 requested                 — returns an empty list, not the default k
+  • trace entry shapes            — locks in the keys app.py's UI renderer depends on
 """
 import json
 import os
@@ -251,3 +262,268 @@ def test_orchestrator_object_state(monkeypatch, tmp_path):
     content = log_file.read_text(encoding="utf-8")
     assert "[AGENT]" in content
     assert "Tools:" in content
+
+
+# ── Test 5: hallucinated / unknown tool name ──────────────────────────────────
+def test_model_calls_unknown_tool(monkeypatch):
+    """A hallucinated/invalid tool name must not crash the loop — _dispatch
+    returns an error payload and the orchestrator keeps going until a real
+    terminal tool (rank_songs) is called."""
+    catalog = [make_song(i, f"Song {i}") for i in range(1, 9)]
+
+    client = FakeGroqClient(
+        [
+            [("delete_catalog", {"confirm": True})],  # not in TOOLS
+            [("rank_songs", {"k": 5})],
+        ]
+    )
+
+    results, trace = orchestrator.run_orchestration(
+        PROFILE, catalog, "unused.csv", k=5, client=client
+    )
+
+    bad_entry = next(e for e in trace if e.get("tool") == "delete_catalog")
+    assert bad_entry["result"] == {"error": "unknown tool: delete_catalog"}
+    assert client.calls == 2, "the loop must continue past the bad call to rank_songs"
+    assert len(results) == 5
+
+
+# ── Test 6: rank_songs called without search_catalog first ───────────────────
+def test_rank_songs_called_without_search_first(monkeypatch):
+    """If the model skips search_catalog and calls rank_songs immediately,
+    self.candidates is still empty — the tool must fall back to ranking the
+    full catalog (self.all_songs) rather than returning nothing or crashing."""
+    catalog = [make_song(i, f"Song {i}") for i in range(1, 9)]
+
+    client = FakeGroqClient([[("rank_songs", {"k": 5})]])
+
+    results, trace = orchestrator.run_orchestration(
+        PROFILE, catalog, "unused.csv", k=5, client=client
+    )
+
+    assert client.calls == 1
+    tools_used = [e["tool"] for e in trace if e["type"] == "tool_call"]
+    assert tools_used == ["rank_songs"]
+    assert len(results) == 5, "should have ranked against the full catalog, not nothing"
+
+
+# ── Test 7: malformed JSON in tool-call arguments ─────────────────────────────
+def test_malformed_tool_arguments(monkeypatch):
+    """Invalid JSON in tool_call.function.arguments (e.g. a truncated/unquoted
+    payload) must be caught and degrade to {} rather than raising an uncaught
+    JSONDecodeError."""
+    catalog = [make_song(i, f"Song {i}") for i in range(1, 9)]
+
+    class _BadArgsClient:
+        def __init__(self):
+            self.calls = 0
+            self.chat = self
+            self.completions = self
+
+        def create(self, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                bad_call = _FakeToolCall("call_0", "search_catalog", "{k: 5")
+                return _FakeResponse(_FakeMessage(content="", tool_calls=[bad_call]))
+            rank_call = _FakeToolCall("call_1", "rank_songs", json.dumps({"k": 5}))
+            return _FakeResponse(_FakeMessage(content="", tool_calls=[rank_call]))
+
+    client = _BadArgsClient()
+    results, trace = orchestrator.run_orchestration(
+        PROFILE, catalog, "unused.csv", k=5, client=client
+    )
+
+    assert client.calls == 2
+    search_entry = next(e for e in trace if e.get("tool") == "search_catalog")
+    assert search_entry["args"] == {}, "malformed JSON must degrade to an empty dict"
+    assert len(results) == 5
+
+
+# ── Test 8: Groq API error mid-loop ────────────────────────────────────────────
+def test_groq_api_error_mid_loop(monkeypatch):
+    """If the Groq client raises mid-loop (rate limit, connection error, etc.),
+    the orchestrator does not swallow it — it propagates so app.py's
+    try/except around run_orchestration can surface a clean st.error(). This
+    locks in that the two stay in sync: orchestrator raises, UI catches."""
+    catalog = [make_song(i, f"Song {i}") for i in range(1, 9)]
+
+    class _FlakyClient:
+        def __init__(self):
+            self.calls = 0
+            self.chat = self
+            self.completions = self
+
+        def create(self, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                tc = _FakeToolCall("call_0", "search_catalog", json.dumps({}))
+                return _FakeResponse(_FakeMessage(content="", tool_calls=[tc]))
+            raise RuntimeError("rate limit exceeded")
+
+    client = _FlakyClient()
+    with pytest.raises(RuntimeError, match="rate limit exceeded"):
+        orchestrator.run_orchestration(PROFILE, catalog, "unused.csv", k=5, client=client)
+    assert client.calls == 2
+
+
+# ── Test 9: expansion succeeds but adds zero new songs ────────────────────────
+def test_expand_returns_zero_new_songs(monkeypatch):
+    """expand_catalog succeeding but finding zero new matching songs is a real
+    possible outcome (not an error) — the orchestrator must still produce a
+    ranked result from whatever candidates exist, without looping or crashing."""
+    catalog = [make_song(1, "Lonely Track")]  # thin catalog
+
+    def _fake_expand(profile, existing, csv_path, target=3):
+        return ([], 0)
+
+    monkeypatch.setattr(expander, "expand_catalog", _fake_expand)
+    monkeypatch.setattr(recommender, "load_songs", lambda path: catalog)  # unchanged
+
+    client = FakeGroqClient(
+        [
+            [("search_catalog", {})],
+            [("expand_catalog_tool", {"target": 3})],
+            [("rank_songs", {"k": 5})],
+        ]
+    )
+
+    results, trace = orchestrator.run_orchestration(
+        PROFILE, catalog, "unused.csv", k=5, client=client
+    )
+
+    expand_entry = next(e for e in trace if e.get("tool") == "expand_catalog_tool")
+    assert expand_entry["result"]["new_songs_added"] == 0
+    assert client.calls == 3
+    assert len(results) == 1, "only the original song was ever available to rank"
+
+
+# ── Test 10: duplicate tool call despite the system prompt's instruction ─────
+def test_duplicate_tool_call_despite_instruction(monkeypatch):
+    """The system prompt asks the model to call search_catalog once, but
+    nothing enforces that. A duplicate call must not accumulate state
+    (candidates get reassigned, not appended) and must not blow past
+    MAX_TURNS unexpectedly."""
+    catalog = [make_song(i, f"Song {i}") for i in range(1, 9)]
+
+    client = FakeGroqClient(
+        [
+            [("search_catalog", {})],
+            [("search_catalog", {})],  # duplicate, against instructions
+            [("rank_songs", {"k": 5})],
+        ]
+    )
+
+    results, trace = orchestrator.run_orchestration(
+        PROFILE, catalog, "unused.csv", k=5, client=client, max_turns=6
+    )
+
+    search_entries = [e for e in trace if e.get("tool") == "search_catalog"]
+    assert len(search_entries) == 2
+    assert (
+        search_entries[0]["result"]["candidate_count"]
+        == search_entries[1]["result"]["candidate_count"]
+    ), "repeating search_catalog must reassign candidates, not accumulate them"
+    assert client.calls == 3
+    assert client.calls <= 6, "duplicate calls must not blow past MAX_TURNS"
+    assert len(results) == 5
+
+
+# ── Test 11: empty catalog ────────────────────────────────────────────────────
+def test_empty_catalog(monkeypatch):
+    """An empty catalog must not raise anywhere in the tool chain — retrieval,
+    ranking, and dispatch should all degrade to an empty result cleanly."""
+    client = FakeGroqClient(
+        [
+            [("search_catalog", {})],
+            [("rank_songs", {"k": 5})],
+        ]
+    )
+
+    results, trace = orchestrator.run_orchestration(
+        PROFILE, [], "unused.csv", k=5, client=client
+    )
+
+    assert results == []
+    search_entry = next(e for e in trace if e.get("tool") == "search_catalog")
+    assert search_entry["result"]["candidate_count"] == 0
+    assert search_entry["result"]["catalog_size"] == 0
+
+
+# ── Test 12: rank_songs called with k=0 ───────────────────────────────────────
+def test_zero_recommendations_requested(monkeypatch):
+    """rank_songs invoked with k=0 must return an empty list. (Guards against
+    a real bug where `k or self.k` treated an explicit 0 as missing and
+    silently substituted the default k instead.)"""
+    catalog = [make_song(i, f"Song {i}") for i in range(1, 9)]
+
+    client = FakeGroqClient(
+        [
+            [("search_catalog", {})],
+            [("rank_songs", {"k": 0})],
+        ]
+    )
+
+    results, trace = orchestrator.run_orchestration(
+        PROFILE, catalog, "unused.csv", k=5, client=client
+    )
+
+    assert results == []
+    rank_entry = next(e for e in trace if e.get("tool") == "rank_songs")
+    assert rank_entry["result"]["ranked"] == []
+
+
+# ── Test 13: trace entry structure for every entry type ──────────────────────
+def test_trace_structure_for_each_tool_type(monkeypatch):
+    """Lock in the trace entry shape for every entry type so a future refactor
+    can't silently break the UI's trace rendering — app.py branches on
+    entry['type'] and reads specific keys per type."""
+    catalog = [make_song(1, "Lonely Track")]
+    enlarged = catalog + [make_song(i, f"Generated {i}") for i in range(2, 8)]
+    new_songs = enlarged[1:]
+
+    monkeypatch.setattr(
+        expander, "expand_catalog", lambda *a, **k: (new_songs, len(new_songs))
+    )
+    monkeypatch.setattr(recommender, "load_songs", lambda path: enlarged)
+
+    client = FakeGroqClient(
+        [
+            [("search_catalog", {})],
+            [("expand_catalog_tool", {"target": 5})],
+            [("rank_songs", {"k": 5})],
+        ]
+    )
+    results, trace = orchestrator.run_orchestration(
+        PROFILE, catalog, "unused.csv", k=5, client=client
+    )
+
+    tool_call_entries = [e for e in trace if e["type"] == "tool_call"]
+    assert len(tool_call_entries) == 3
+    for entry in tool_call_entries:
+        assert set(entry.keys()) == {"turn", "type", "tool", "args", "result"}
+        assert isinstance(entry["turn"], int)
+        assert isinstance(entry["tool"], str)
+        assert isinstance(entry["args"], dict)
+        assert isinstance(entry["result"], dict)
+
+    # A run that hits MAX_TURNS must produce well-formed cap_hit + fallback entries.
+    cap_client = FakeGroqClient([[("search_catalog", {})]])
+    _, cap_trace = orchestrator.run_orchestration(
+        PROFILE, catalog, "unused.csv", k=5, client=cap_client, max_turns=2
+    )
+    cap_entry = next(e for e in cap_trace if e["type"] == "cap_hit")
+    assert set(cap_entry.keys()) == {"type", "reason", "api_calls", "max_turns"}
+    fallback_entry = next(e for e in cap_trace if e["type"] == "fallback")
+    assert set(fallback_entry.keys()) == {"type", "reason", "pool_size", "ranked_count"}
+
+    # A run ending in plain text (no tool call) must produce a well-formed
+    # final_message entry.
+    text_client = FakeGroqClient(
+        [[("search_catalog", {})], "All done, no more tools needed."]
+    )
+    _, text_trace = orchestrator.run_orchestration(
+        PROFILE, catalog, "unused.csv", k=5, client=text_client
+    )
+    final_entry = next(e for e in text_trace if e["type"] == "final_message")
+    assert set(final_entry.keys()) == {"turn", "type", "content"}
+    assert isinstance(final_entry["content"], str)

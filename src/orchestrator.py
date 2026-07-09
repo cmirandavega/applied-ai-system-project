@@ -208,8 +208,11 @@ class AgentOrchestrator:
         }
 
     def _tool_rank_songs(self, args: Dict) -> Dict:
+        # `k or self.k` would treat an explicit k=0 as "missing" and silently
+        # substitute self.k — check for None instead so k=0 is honored.
+        raw_k = args.get("k", self.k)
         try:
-            k = int(args.get("k", self.k) or self.k)
+            k = int(raw_k) if raw_k is not None else self.k
         except (TypeError, ValueError):
             k = self.k
         pool = self.candidates if self.candidates else self.all_songs

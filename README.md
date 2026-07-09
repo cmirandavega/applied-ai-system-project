@@ -1,62 +1,56 @@
-# 🎵 Music Recommender Simulation
+# VibeMatch 2.0 — AI-Powered Music Recommender
 
-## Project Summary
+## Original Project: Music Recommender Simulation (Module 3)
 
-In this project you will build and explain a small music recommender system.
-
-Your goal is to:
-
-- Represent songs and a user "taste profile" as data
-- Design a scoring rule that turns that data into recommendations
-- Evaluate what your system gets right and wrong
-- Reflect on how this mirrors real world AI recommenders
-
-Replace this paragraph with your own summary of what your version does.
+The original project, **Music Recommender Simulation**, was a rule-based CLI recommender built in Module 3. It represented songs as structured data objects and scored each one against a hard-coded user taste profile using a weighted formula across five audio features: genre, mood, energy, acousticness, and valence. The system could rank an 18-song catalog and explain every recommendation with a per-feature score breakdown, but it required profiles to be written directly in Python code and could not understand natural language or expand beyond its fixed catalog.
 
 ---
 
-## How The System Works
+## Title and Summary
 
-Real-world music recommenders like Spotify or YouTube Music combine two signals: what you have explicitly told the system (liked songs, skipped tracks) and patterns inferred by comparing you to millions of other listeners. They continuously re-rank a massive catalog using dozens of audio features, context signals, and social data. This simulation strips that down to its transparent core. Rather than learning from behavior over time, it takes a fixed user taste profile and scores every song in a small catalog against it using a weighted formula — prioritizing genre and mood as hard categorical signals, then using numerical audio features to reward the closest match. Every recommendation can be explained by pointing directly to which features matched and by how much.
+**VibeMatch 2.0** upgrades the original simulation into a full AI-assisted recommendation system. A user types a plain-English description of what they want to hear — *"something chill and acoustic for late-night studying"* — and the system extracts a structured taste profile using an LLM, retrieves the most relevant songs from a static catalog of 559 real songs using a RAG pre-filter, scores and ranks the candidates, and presents ranked results with full score breakdowns in a Streamlit web UI.
 
-### Song Features
+The project demonstrates how a simple rule-based recommender can be made genuinely useful by layering natural language understanding and retrieval-augmented generation on top of a transparent scoring core — without sacrificing explainability. The catalog is built from real, well-known songs across 15 genres, acting as a reliable static fallback that never requires an LLM to generate fictional music data.
 
-Each `Song` object stores the following features used in scoring:
+---
 
-| Feature | Type | Role in scoring |
-|---|---|---|
-| `genre` | Categorical | Hard match — highest weight |
-| `mood` | Categorical | Hard match — second highest weight |
-| `energy` | Float (0–1) | Distance from user's target energy |
-| `valence` | Float (0–1) | Musical positivity signal |
-| `acousticness` | Float (0–1) | Matched against user's acoustic preference |
-| `danceability` | Float (0–1) | Supporting numerical signal |
-| `tempo_bpm` | Float (60–200) | Normalized; used as a tiebreaker |
+## Architecture Overview
 
-### UserProfile Features
+```
+User Input (natural language)
+        │
+        ▼
+┌─────────────────┐
+│   src/agent.py  │  LLM extracts structured UserProfile dict
+│ (Groq / Gemini) │  {genre, mood, energy, likes_acoustic}
+└────────┬────────┘
+         │
+         ▼
+┌──────────────────────┐
+│  src/retriever.py    │  RAG pre-filter: genre OR mood OR energy ±0.25
+│  retrieve_candidates │  Returns candidate subset (≥6) or full catalog
+└────────┬─────────────┘
+         │
+         ▼
+┌──────────────────────┐
+│  src/recommender.py  │  Scores every candidate (max 5.0 pts)
+│  recommend_songs()   │  Genre +2.0 | Mood +1.0 | Energy +1.0
+└────────┬─────────────┘         │ Acousticness +0.5 | Valence +0.5
+         │
+         ▼
+┌──────────────────────┐
+│  src/logger.py       │  Logs input, profile, and top result to
+│                      │  logs/recommender.log
+└────────┬─────────────┘
+         │
+         ▼
+┌──────────────────────┐
+│     app.py           │  Streamlit UI — profile metrics, ranked results,
+│  (Streamlit UI)      │  score bars, RAG reasoning expander
+└──────────────────────┘
+```
 
-Each `UserProfile` stores:
-
-- `favorite_genre` — matched against `Song.genre`
-- `favorite_mood` — matched against `Song.mood`
-- `target_energy` — the user's ideal energy level (0–1)
-- `likes_acoustic` — boolean preference scored against `Song.acousticness`
-
-### How the Recommender Scores Each Song
-
-For every song in the catalog, the `Recommender` computes a single score between 0 and 1 using a weighted sum:
-
-- **+0.35** if `song.genre` matches `user.favorite_genre`
-- **+0.25** if `song.mood` matches `user.favorite_mood`
-- **+0.20** × Gaussian similarity between `song.energy` and `user.target_energy`
-- **+0.10** based on how well `song.acousticness` aligns with `user.likes_acoustic`
-- **+0.10** × `song.valence` as a general positivity bonus
-
-This gives every song an independent score that reflects how closely it fits the user's profile.
-
-### How Songs Are Chosen
-
-After scoring all songs, the `Recommender` sorts them from highest to lowest score and returns the top `k` results (default: 5). Songs with identical scores are broken by `valence`, favoring more positive tracks. The final list represents the best-matching songs across the catalog for that specific user profile.
+The system uses a **Retrieval-Augmented Generation** pattern: the retriever narrows the scoring space before the recommender runs. The LLM is used once — to understand the user's natural language input — and all song matching is done against a static catalog of real songs. The core scoring logic remains a deterministic, explainable formula with no black-box decisions.
 
 ---
 
@@ -68,19 +62,16 @@ output (a ranked list with score breakdowns) so you can compare them side by sid
 
 ### Fixed pipeline (default)
 
-The original path runs a fixed sequence, and every branch in it is decided by
-**hardcoded heuristics**, not by a model:
+The default path runs the fixed sequence described in the Architecture Overview,
+and every branch in it is decided by **hardcoded heuristics**, not by a model:
 
 ```
 extract_profile → retrieve_candidates → recommend_songs
 ```
 
-`retrieve_candidates()` in `src/retriever.py` already contains a hardcoded
-fallback: if fewer than `MIN_CANDIDATES` (6) songs match, it falls back to
-scoring the entire catalog. The companion heuristic `needs_expansion()` in
-`src/expander.py` is a plain `if` (expand when there are too few matches, or too
-few songs in the requested genre) that gates the catalog-expansion step. In both
-cases the branch is decided by code with fixed thresholds.
+`retrieve_candidates()` in `src/retriever.py` contains a hardcoded fallback: if
+fewer than `MIN_CANDIDATES` (6) songs match, it falls back to scoring the entire
+catalog. The branch is decided by code with fixed thresholds.
 
 ### Agent orchestration (alternate)
 
@@ -99,10 +90,14 @@ inserts `search_catalog → expand_catalog_tool → rank_songs` on its own. The 
 tool-call decisions are surfaced in the **"Agent Tool-Call Trace"** expander in the
 UI, mirroring the fixed pipeline's "RAG Retrieval Reasoning" expander.
 
+> Note: with the full 559-song catalog, `search_catalog` almost always returns
+> enough candidates, so the model goes straight to ranking; `expand_catalog_tool`
+> is exercised mainly when the candidate pool is genuinely thin.
+
 ### Why offer both?
 
 - **Fixed pipeline** — deterministic, fast, no extra API calls, easy to reason about. The expansion decision is a fixed threshold.
-- **Agent orchestration** — the *branching decision* is made by the model based on the tool results it sees, rather than a fixed threshold. This is more flexible (the model can decide to expand more aggressively, skip it, or re-search) but adds latency and Groq API calls and is less predictable.
+- **Agent orchestration** — the *branching decision* is made by the model based on the tool results it sees, rather than a fixed threshold. More flexible, but adds latency and Groq API calls and is less predictable.
 
 ### Safety cap
 
@@ -126,250 +121,268 @@ Groq client, so they never make real API calls.
 
 ---
 
-## Getting Started
+## Catalog
 
-### Setup
+`data/songs.csv` contains **559 real songs** across all 15 supported genres. Songs were sourced from Billboard charts and well-known genre catalogs, with estimated audio features (energy, tempo, valence, danceability, acousticness) based on each song's known character.
 
-1. Create a virtual environment (optional but recommended):
+| Genre | Songs | Example Artists |
+|---|---|---|
+| pop | 74 | Taylor Swift, Ed Sheeran, Adele, BTS |
+| hip-hop | 51 | Drake, Kendrick Lamar, Eminem, Kanye West |
+| rock | 51 | Queen, Nirvana, Metallica, Foo Fighters |
+| latin | 50 | Shakira, Bad Bunny, Celia Cruz, Buena Vista Social Club |
+| soul | 35 | Stevie Wonder, Marvin Gaye, Aretha Franklin, SZA |
+| jazz | 31 | Miles Davis, Frank Sinatra, Norah Jones, Duke Ellington |
+| indie pop | 30 | Tame Impala, Lorde, The 1975, Vampire Weekend |
+| blues | 30 | B.B. King, Stevie Ray Vaughan, Robert Johnson |
+| classical | 30 | Beethoven, Debussy, Mozart, Chopin |
+| electronic | 30 | Daft Punk, Avicii, Skrillex, Alan Walker |
+| folk | 30 | Bob Dylan, Fleet Foxes, Bon Iver, Tracy Chapman |
+| metal | 29 | Metallica, Slayer, Black Sabbath, Slipknot |
+| lofi | 27 | jinsang, Idealism, Philanthrope, Kupla |
+| ambient | 26 | Brian Eno, Sigur Rós, Aphex Twin, Max Richter |
+| synthwave | 26 | Kavinsky, The Midnight, Carpenter Brut, Gunship |
 
-   ```bash
-   python -m venv .venv
-   source .venv/bin/activate      # Mac or Linux
-   .venv\Scripts\activate         # Windows
+Every genre has well above the 6-song retrieval threshold, so every query returns real, relevant results without needing to generate fictional songs.
 
-2. Install dependencies
+---
+
+## Setup Instructions
+
+### 1. Clone the repository
+
+```bash
+git clone <your-repo-url>
+cd applied-ai-system-project
+```
+
+### 2. Install dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-3. Run the app:
+### 3. Configure your API key
+
+Add your key to a `.env` file in the project root. **Groq is recommended** — it has a reliable free tier and no regional restrictions.
+
+**Option A — Groq** (recommended):
+1. Go to [console.groq.com](https://console.groq.com) → **API Keys** → **Create API key**
+2. Add to `.env`:
+   ```
+   GROQ_API_KEY=gsk_...
+   ```
+
+**Option B — Google Gemini** (free tier, some regional restrictions):
+1. Go to [aistudio.google.com](https://aistudio.google.com) → **Get API key** → **Create API key in new project**
+2. Add to `.env`:
+   ```
+   GOOGLE_API_KEY=AIza...
+   ```
+
+The system automatically uses Groq if `GROQ_API_KEY` is present, and falls back to Gemini otherwise.
+
+### 4. Run the Streamlit app
+
+```bash
+python -m streamlit run app.py
+```
+
+Opens at `http://localhost:8501`
+
+### 5. Run the CLI (original interface)
 
 ```bash
 python -m src.main
 ```
 
-### Running Tests
-
-Run the starter tests with:
+### 6. Run tests
 
 ```bash
-pytest
+python -m pytest tests/ -v
 ```
 
-You can add more tests in `tests/test_recommender.py`.
+Expected: **9 passed**
 
 ---
 
-## Example Output
+## Sample Interactions
 
-Here's what the recommender produces for the default user profile (pop genre, happy mood, 0.8 target energy):
+### Example 1 — Natural language → profile extraction → recommendations
 
-![Terminal Output](screenshots/terminal_Output.png)
+**Input:**
+> "I want something chill and acoustic for late-night studying"
 
-The output shows:
-- **Top 5 recommendations** sorted by score (highest first)
-- **Score breakdown** with visual progress bar (0.0 → 5.0)
-- **Detailed reasons** for each component (genre, mood, energy, acousticness, valence)
-- **Clear indicators** (✓ match, ✗ mismatch) for categorical features
+**Extracted profile:**
+| Genre | Mood | Energy | Acoustic |
+|---|---|---|---|
+| lofi | chill | 0.35 | Yes |
 
-Key insight: *Sunrise City* is the #1 recommendation because it matches both genre and mood perfectly, with nearly identical energy to the target. Scores drop significantly when categorical matches are lost.
+**Top recommendations:**
+```
+1. Midnight Coding — LoRoom             Score: 4.65 / 5.0
+2. Library Rain — Paper Lanterns        Score: 4.41 / 5.0
+3. Lay It On Me — Tennyson              Score: 4.37 / 5.0
+```
 
----
-
-## Multi-Profile Testing Results
-
-The recommender generates different recommendations based on each user's unique profile. Here are the results for all four user profiles:
-
-### Profile 1: High-Energy Pop
-
-![High-Energy Pop Recommendations](screenshots/highEnergyPop.png)
-
-**Profile:** Pop genre, happy mood, 0.8 target energy, prefers non-acoustic
-
-This profile favors upbeat, energetic pop tracks with high valence. Sunrise City dominates as the #1 choice due to perfect genre/mood match and near-identical energy.
+**RAG retrieval:** 295 of 559 songs passed the filters (genre=lofi OR mood=chill OR energy ≈ 0.35).
 
 ---
 
-### Profile 2: Chill Lofi
+### Example 2 — Melancholic Spanish songs
 
-![Chill Lofi Recommendations](screenshots/chillLofi.png)
+**Input:**
+> "Melancholic Spanish songs"
 
-**Profile:** Lofi genre, chill mood, 0.35 target energy, prefers acoustic
+**Extracted profile:**
+| Genre | Mood | Energy | Acoustic |
+|---|---|---|---|
+| latin | melancholic | 0.50 | — |
 
-This profile seeks relaxing, low-energy tracks with acoustic qualities. The Gaussian energy similarity rewards songs close to the 0.35 target.
+**Top recommendations:**
+```
+1. No Me Doy Por Vencido — Luis Fonsi   Score: 4.52 / 5.0
+2. Por Tu Amor — Marc Anthony           Score: 4.50 / 5.0
+3. Tal Vez — Ricky Martin               Score: 4.39 / 5.0
+4. Vivir Sin Aire — Maná                Score: 4.38 / 5.0
+5. La Tortura — Shakira                 Score: 4.32 / 5.0
+```
 
----
-
-### Profile 3: Deep Intense Rock
-
-![Deep Intense Rock Recommendations](screenshots/deepIntenseRock.png)
-
-**Profile:** Rock genre, intense mood, 0.91 target energy, prefers non-acoustic
-
-This profile demands high-energy, intense tracks. The scoring system heavily weights exact genre/mood matches for this power-user profile.
-
----
-
-### Profile 4: Latin Playful
-
-![Latin Playful Recommendations](screenshots/latinPlayful.png)
-
-**Profile:** Latin genre, playful mood, 0.71 target energy, prefers non-acoustic
-
-This profile targets energetic, uplifting Latin music. The system discovers niche recommendations based on the specific genre/mood combination.
+The latin genre catalog was curated to separate Spanish-language songs from English-language artists who were previously mislabeled as latin. All top results are Spanish-language.
 
 ---
 
-## Key Insights from Multi-Profile Testing
+### Example 3 — High-energy rock
 
-- **Genre/Mood Dominance:** Categorical matches heavily influence ranking (±2.0 and ±1.0 points respectively)
-- **Energy as Differentiator:** The Gaussian similarity metric provides smooth, intuitive energy matching
-- **Profile Diversity:** Each user profile receives completely different top-5 results, showing the system correctly segments preferences
-- **Acousticness Preference:** Profiles with `likes_acoustic=True` show clear preference for high-acousticness songs
+**Input:**
+> "Heavy and intense, I'm working out"
+
+**Extracted profile:**
+| Genre | Mood | Energy | Acoustic |
+|---|---|---|---|
+| rock | intense | 0.80 | No |
+
+**Top recommendations:**
+```
+1. Alive — Pearl Jam                    Score: 4.74 / 5.0
+2. Welcome to the Jungle — Guns N' Roses  Score: 4.72 / 5.0
+3. We Will Rock You — Queen             Score: 4.69 / 5.0
+```
 
 ---
 
-## Experiments You Tried
+### Example 4 — Romantic jazz dinner
 
-Use this section to document the experiments you ran. For example:
+**Input:**
+> "Romantic jazz for a dinner date"
 
-- What happened when you changed the weight on genre from 2.0 to 0.5
-- What happened when you added tempo or valence to the score
-- How did your system behave for different types of users
+**Extracted profile:**
+| Genre | Mood | Energy | Acoustic |
+|---|---|---|---|
+| jazz | romantic | 0.50 | Yes |
+
+**Top recommendations:**
+```
+1. Fly Me to the Moon — Frank Sinatra   Score: 4.29 / 5.0
+2. The Way You Look Tonight — Frank Sinatra  Score: 4.15 / 5.0
+3. Moonlight Serenade — Glenn Miller    Score: 4.02 / 5.0
+```
 
 ---
 
-## Limitations and Risks
+## Design Decisions
 
-Summarize some limitations of your recommender.
+### Why a deterministic scoring formula instead of a learned model?
+Transparency was the priority. Every recommendation can be traced to an exact score contribution from each feature. A neural collaborative filter would likely produce better rankings on a large dataset but would give no explanation for why a song appeared. For a project exploring how recommenders work, explainability beats accuracy.
 
-Examples:
+### Why RAG instead of scoring all 559 songs every time?
+Two reasons. First, it mirrors how production recommenders work — they retrieve a candidate set before ranking, rather than scoring millions of tracks. Second, it keeps the scoring loop fast and focused even as the catalog grows.
 
-- It only works on a tiny catalog
-- It does not understand lyrics or language
-- It might over favor one genre or mood
+### Why a static catalog of real songs instead of LLM-generated expansion?
+The original design used an LLM to generate new fictional songs on demand when a genre was under-represented. This was replaced with a curated catalog of 559 real, well-known songs because:
+- Real songs produce meaningful, recognizable recommendations
+- The catalog is large enough to serve every genre without generation
+- LLM-generated songs introduced quality issues — inconsistent audio features, fictional artists that felt out of place, and mislabeled genres
+- Removing the expander eliminates an entire failure mode (LLM quota errors during expansion)
 
-You will go deeper on this in your model card.
+### Why Groq over Gemini?
+Gemini's free tier has `limit: 0` quota issues on new API keys in certain regions, which causes the system to silently fall back to default profiles. Groq's free tier is more reliable. The system detects which key is present and routes accordingly, so both work.
+
+### Why curate genre assignments in the catalog?
+The initial catalog included English-language artists (Jason Derulo, Pitbull, Major Lazer) under the `latin` genre because they have a Latin-influenced sound. This caused Spanish-language searches to return English results. Genre labels were corrected so that `latin` only contains Spanish/Portuguese-language songs — which is what users expect when they search for "Spanish" or "Latin" music.
+
+### Trade-offs made
+| Decision | Benefit | Cost |
+|---|---|---|
+| Static real-song catalog | Reliable, recognizable results | Catalog doesn't grow automatically |
+| Removed LLM expander | Eliminates expansion failure mode | Niche genres not in catalog return full-catalog fallback |
+| Groq as primary LLM | Reliable free tier | Adds a second API dependency |
+| Genre label curation | Spanish searches return Spanish songs | Manual effort to maintain genre accuracy |
+| No `@st.cache_data` on `get_songs()` | Catalog changes appear immediately | Reads disk on every button click |
+
+---
+
+## Testing Summary
+
+### What worked
+
+- **9/9 tests pass** across both test files (`test_recommender.py`, `test_reliability.py`)
+- Groq backend (`llama-3.1-8b-instant`) correctly extracts structured profiles from natural language
+- RAG retrieval correctly includes exact genre matches and filters by energy window
+- Logger test with `monkeypatch` correctly redirects the log file to a temp path and verifies content
+- Empty and whitespace inputs reliably return `DEFAULT_PROFILE` without hitting the API
+- All 5 smoke-test inputs returned genre-accurate, recognizable song recommendations
+
+### What didn't work
+
+- **Gemini free tier quota** — `limit: 0` errors appeared on the existing API key, causing every query to silently return the default pop/happy profile. Switching to Groq resolved this.
+- **Groq model deprecation** — the initially configured model (`llama3-8b-8192`) had been decommissioned. Updating to `llama-3.1-8b-instant` fixed it.
+- **English songs in the latin genre** — the initial catalog included English-language artists under `latin`, causing searches for Spanish music to surface Jason Derulo and Pitbull. Genre labels were corrected.
+
+### What was learned
+
+- `limit: 0` in a Google API quota error means the project has zero allocated quota — it is not a "you've used up your quota" message, and waiting does not help. Creating a fresh API key in a new Google project is the correct fix.
+- LLM model names have lifecycles. Hard-coding a specific model ID without checking the provider's deprecation list is a silent breakage waiting to happen.
+- Genre labels in a music catalog are subjective but consequential. An artist like Pitbull belongs in `latin` from a cultural standpoint but his English-language tracks don't match what users mean when they search for "Spanish songs." Label granularity matters.
+
+---
+
+## Responsible AI
+
+### Limitations and biases in the system
+
+The scoring formula treats genre and mood as binary matches — a song either matches or it doesn't, with no partial credit. This makes the system inherently biased toward genres that are well represented in the catalog. The catalog skews toward Western popular music; genres like Afrobeats, K-pop, bhangra, or regional folk traditions are absent.
+
+There is also a bias embedded in the profile extraction step. When the LLM cannot confidently interpret an input, it defaults to `pop / happy / 0.5 energy` — the most statistically common profile in Western streaming data. Ambiguous or culturally specific inputs silently degrade to a generic Western pop profile rather than asking for clarification.
+
+### Could this AI be misused?
+
+The main risk is **API key exposure** — if a user accidentally commits their `.env` file, the key is public. The `.gitignore` entry for `.env` addresses this, but does not prevent a user from force-adding the file.
+
+Since catalog expansion was removed, the previous catalog poisoning risk (LLM-generated songs with extreme feature values appended without review) no longer applies.
+
+### What surprised you while testing reliability
+
+The most surprising finding was how quietly the system failed. When the Gemini API returned a quota error, `extract_profile()` caught the exception and silently returned the default pop/happy profile. The app continued to show recommendations — plausible-looking ones — with no indication that the LLM had not run at all. This underscored that reliability testing needs to probe failure paths explicitly, not just the happy path.
+
+A second surprise was discovering that `llama3-8b-8192` on Groq had been silently decommissioned. The error only surfaced at runtime; there was no static warning. This is a general lesson about depending on external model identifiers — they change without notice.
+
+### Collaboration with AI during this project
+
+This project was built collaboratively with Claude Code (Anthropic). The AI handled file creation, module wiring, test writing, catalog generation, and debugging based on a detailed specification.
+
+**One instance where the AI gave a helpful suggestion:** When the Gemini API returned `limit: 0` quota errors, the AI correctly identified that this was a project-level configuration issue rather than a temporary rate limit, and recommended Groq as an alternative. It also correctly diagnosed that `llama3-8b-8192` had been decommissioned and updated the model to `llama-3.1-8b-instant`.
+
+**One instance where the AI's suggestion was flawed:** The initial catalog generation included English-language artists (Jason Derulo, Pitbull, Major Lazer) in the `latin` genre because they have a Latin-influenced sound. This only became apparent when a real user query for "melancholic Spanish songs" surfaced Jason Derulo as a top result. The genre assignment needed manual review and correction — something the AI could not anticipate without user feedback.
 
 ---
 
 ## Reflection
 
-Read and complete `model_card.md`:
+Building VibeMatch 2.0 made the gap between a rule-based system and an AI-assisted one very concrete. The original recommender was correct and explainable, but completely rigid. Adding an LLM extraction layer made the same scoring logic accessible to anyone who can type a sentence.
 
-[**Model Card**](model_card.md)
+The harder lesson was about failure modes. In the original project, failures were obvious — the code either ran or it didn't. In an LLM-integrated system, failures are quiet: the agent returns a default profile, the UI still shows recommendations, and the user has no idea their input was ignored. Designing for visible, fast failures — surfacing error messages, choosing a reliable LLM provider, failing immediately instead of sleeping and retrying — turned out to be as important as the feature logic itself.
 
-Write 1 to 2 paragraphs here about what you learned:
+Replacing LLM-generated catalog expansion with a curated real-song catalog also changed how I think about data quality. A larger, real catalog is more valuable than an infinitely expandable fictional one, because the recommendations mean something to users. When someone searches for "melancholic Spanish songs" and gets songs they actually recognize — Shakira, Maná, Marc Anthony — that is a fundamentally better outcome than getting a list of convincing-sounding fictional artists.
 
-- about how recommenders turn data into predictions
-- about where bias or unfairness could show up in systems like this
-
-
----
-
-## 7. `model_card_template.md`
-
-Combines reflection and model card framing from the Module 3 guidance. :contentReference[oaicite:2]{index=2}  
-
-```markdown
-# 🎧 Model Card - Music Recommender Simulation
-
-## 1. Model Name
-
-Give your recommender a name, for example:
-
-> VibeFinder 1.0
-
----
-
-## 2. Intended Use
-
-- What is this system trying to do
-- Who is it for
-
-Example:
-
-> This model suggests 3 to 5 songs from a small catalog based on a user's preferred genre, mood, and energy level. It is for classroom exploration only, not for real users.
-
----
-
-## 3. How It Works (Short Explanation)
-
-Describe your scoring logic in plain language.
-
-- What features of each song does it consider
-- What information about the user does it use
-- How does it turn those into a number
-
-Try to avoid code in this section, treat it like an explanation to a non programmer.
-
----
-
-## 4. Data
-
-Describe your dataset.
-
-- How many songs are in `data/songs.csv`
-- Did you add or remove any songs
-- What kinds of genres or moods are represented
-- Whose taste does this data mostly reflect
-
----
-
-## 5. Strengths
-
-Where does your recommender work well
-
-You can think about:
-- Situations where the top results "felt right"
-- Particular user profiles it served well
-- Simplicity or transparency benefits
-
----
-
-## 6. Limitations and Bias
-
-Where does your recommender struggle
-
-Some prompts:
-- Does it ignore some genres or moods
-- Does it treat all users as if they have the same taste shape
-- Is it biased toward high energy or one genre by default
-- How could this be unfair if used in a real product
-
----
-
-## 7. Evaluation
-
-How did you check your system
-
-Examples:
-- You tried multiple user profiles and wrote down whether the results matched your expectations
-- You compared your simulation to what a real app like Spotify or YouTube tends to recommend
-- You wrote tests for your scoring logic
-
-You do not need a numeric metric, but if you used one, explain what it measures.
-
----
-
-## 8. Future Work
-
-If you had more time, how would you improve this recommender
-
-Examples:
-
-- Add support for multiple users and "group vibe" recommendations
-- Balance diversity of songs instead of always picking the closest match
-- Use more features, like tempo ranges or lyric themes
-
----
-
-## 9. Personal Reflection
-
-A few sentences about what you learned:
-
-- What surprised you about how your system behaved
-- How did building this change how you think about real music recommenders
-- Where do you think human judgment still matters, even if the model seems "smart"
-
+https://www.loom.com/share/de41919e78554a6e962772b9350d2640 

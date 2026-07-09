@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip install:*)",
+      "Bash(python -c \"import anthropic; print\\('anthropic OK'\\)\")",
+      "Bash(where python:*)",
+      "Bash(where python3:*)",
+      "Bash(where py:*)",
+      "Bash(C:\\\\Users\\\\Cockless\\\\AppData\\\\Local\\\\Python\\\\bin\\\\python.exe -m pip install anthropic)",
+      "Bash(\"/c/Users/Cockless/AppData/Local/Python/bin/python.exe\" -m pip install anthropic)",
+      "Bash(python -m pytest tests/ -v)"
+    ]
+  }
+}

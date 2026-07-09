@@ -1,3 +1,6 @@
+google-genai
+groq
 pandas
 pytest
+python-dotenv
 streamlit
